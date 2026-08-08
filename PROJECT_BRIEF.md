@@ -4,7 +4,9 @@ Read this before writing code. It's the shared context for every module in this 
 
 ## What this is
 
-A prototype dashboard: constituency-level social/new-media sentiment intelligence for India's Lok Sabha seats. Real ECI election data drives swing-tier classification; real YouTube data + real news RSS feeds are analyzed by a real LLM (Claude) for topic/sentiment/narrative. X/Instagram/Facebook are NOT live (official APIs require paid/approved access not obtainable here) — they're wired as inactive "connect your API key" adapters with the same interface shape as YouTube, not scrapers.
+A prototype dashboard: constituency-level social/new-media sentiment intelligence for India's Lok Sabha seats. Real ECI election data drives swing-tier classification; real news RSS feeds are analyzed by a real LLM (Claude) for topic/sentiment/narrative. X/Instagram/Facebook are NOT live (official APIs require paid/approved access not obtainable here) — they're wired as inactive "connect your API key" adapters, not scrapers.
+
+**Tracked channels are fictional, by deliberate later decision** (see README.md and /methodology): the platform originally tracked real, named YouTube channels via the real YouTube Data API (`src/lib/youtube/`, `src/data/channels.ts` — both still present, unused). That was replaced with invented personas (`src/data/dummy-channels.ts`) once the product judged that attaching computed sentiment to real named creators — even genuinely computed — was too close to the defamation risk the source PRD's Section 7 warns about, for a widely-shared link. `src/lib/pipeline/channels.ts` now builds `ChannelDisplay` rows from the fictional data instead of live YouTube calls, but keeps the exact same return shape so nothing downstream (constituency briefs, alerts, pages) needed to change. Real LLM analysis still runs over this fictional content — only the source material is invented, not the analysis.
 
 ## Non-negotiable framing rules (do not skip)
 

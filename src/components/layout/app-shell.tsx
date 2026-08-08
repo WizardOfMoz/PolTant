@@ -125,9 +125,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           <NavList pathname={pathname} />
         </aside>
 
-        {/* Mobile top bar + sheet nav */}
-        <div className="flex flex-1 flex-col md:hidden">
-          <header className="flex items-center justify-between border-b border-border px-4 py-3">
+        {/* Content — rendered exactly once; only the nav chrome above/below
+            switches with viewport (a previous version duplicated {children}
+            into separate mobile/desktop <main> elements toggled by CSS,
+            which double-mounted every page's client components). */}
+        <div className="flex flex-1 flex-col min-w-0">
+          <header className="flex items-center justify-between border-b border-border px-4 py-3 md:hidden">
             <BrandMark />
             <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
               <Button
@@ -149,9 +152,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           </header>
           <main className="flex-1 min-w-0">{children}</main>
         </div>
-
-        {/* Desktop content */}
-        <main className="hidden flex-1 min-w-0 md:block">{children}</main>
       </div>
     </div>
   );

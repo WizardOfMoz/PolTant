@@ -3,6 +3,7 @@ import type { Constituency } from "@/data/constituencies";
 import { getChannelsWithLiveData } from "./channels";
 import { getLiveRssItems } from "./rss";
 import { analyzeBatch, type AnalysisOutcome } from "./analysis";
+import type { Platform } from "@/data/dummy-channels";
 import {
   synthesizeConstituencyBrief,
   type ConstituencyBrief,
@@ -13,7 +14,7 @@ export interface ConstituencyItemAnalysis extends AnalysisOutcome {
   title: string;
   url: string;
   sourceName: string;
-  sourceKind: "youtube" | "rss";
+  sourceKind: Platform | "rss";
 }
 
 export interface ConstituencyBriefResult {
@@ -42,42 +43,41 @@ async function buildConstituencyBrief(
     getLiveRssItems(),
   ]);
 
-  const relevantVideos = channels.flatMap((channel) =>
+  // Channel posts are already analyzed once in src/lib/pipeline/channels.ts
+  // (so /channels can show per-post results too) — reuse that AnalysisOutcome
+  // directly rather than paying for a second Claude call on the same content.
+  const relevantChannelItems: ConstituencyItemAnalysis[] = channels.flatMap((channel) =>
     channel.expectedPrimaryState === constituency.state
       ? channel.recentVideos.map((v) => ({
-          id: `yt-${v.url.split("v=")[1] ?? v.url}`,
+          sentimentScore: v.sentimentScore,
+          topics: v.topics,
+          narrativeSummary: v.narrativeSummary,
+          unavailable: v.unavailable,
           title: v.title,
-          snippet: null as string | null,
-          topCommentsText: v.topCommentsText,
-          sourceName: channel.displayName,
           url: v.url,
-          sourceKind: "youtube" as const,
+          sourceName: channel.displayName,
+          sourceKind: channel.platform,
         }))
       : []
   );
 
-  const relevantRss = rssItems
-    .filter(
-      (item) =>
-        item.guessedConstituencyId === constituency.id || item.guessedState === constituency.state
-    )
-    .map((item) => ({
+  const relevantRss = rssItems.filter(
+    (item) =>
+      item.guessedConstituencyId === constituency.id || item.guessedState === constituency.state
+  );
+  const rssAnalysisMap = await analyzeBatch(
+    relevantRss.map((item) => ({
       id: `rss-${item.url}`,
       title: item.title,
       snippet: item.snippet,
-      topCommentsText: undefined,
-      sourceName: item.rssSourceId,
-      url: item.url,
-      sourceKind: "rss" as const,
-    }));
-
-  const candidates = [...relevantVideos, ...relevantRss];
-  const analysisMap = await analyzeBatch(candidates);
-
-  const items: ConstituencyItemAnalysis[] = candidates.map((c) => {
-    const analysis = analysisMap.get(c.id)!;
-    return { ...analysis, title: c.title, url: c.url, sourceName: c.sourceName, sourceKind: c.sourceKind };
+    }))
+  );
+  const rssItemsAnalyzed: ConstituencyItemAnalysis[] = relevantRss.map((item) => {
+    const analysis = rssAnalysisMap.get(`rss-${item.url}`)!;
+    return { ...analysis, title: item.title, url: item.url, sourceName: item.rssSourceId, sourceKind: "rss" };
   });
+
+  const items: ConstituencyItemAnalysis[] = [...relevantChannelItems, ...rssItemsAnalyzed];
 
   // Only feed items with a real civic/political signal into the brief —
   // items that came back unavailable or off-topic (empty topics, per the

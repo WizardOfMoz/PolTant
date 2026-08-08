@@ -1,6 +1,6 @@
 import { unstable_cache } from "next/cache";
 import { getDb, schema } from "@/db/client";
-import { CHANNELS } from "@/data/channels";
+import { DUMMY_CHANNELS } from "@/data/dummy-channels";
 import { desc, eq } from "drizzle-orm";
 
 /**
@@ -42,7 +42,7 @@ async function computeGrowthAlerts(): Promise<AlertsResult> {
 
   const alerts: GrowthAlert[] = [];
 
-  for (const curated of CHANNELS) {
+  for (const curated of DUMMY_CHANNELS) {
     const handleSlug = `yt-${curated.handle.replace(/^@/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 
     const channelRow = await db.query.channels.findFirst({

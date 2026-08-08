@@ -94,7 +94,7 @@ export const rssSources = pgTable("rss_sources", {
 /** Real fetched public content — YouTube videos or RSS articles. */
 export const content = pgTable("content", {
   id: text("id").primaryKey(),
-  source: text("source").notNull(), // "youtube" | "rss"
+  source: text("source").notNull(), // "youtube" | "x" | "instagram" | "facebook" | "rss"
   channelId: text("channel_id").references(() => channels.id),
   rssSourceId: text("rss_source_id").references(() => rssSources.id),
   title: text("title").notNull(),

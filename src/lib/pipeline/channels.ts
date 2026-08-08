@@ -1,23 +1,37 @@
 import { unstable_cache } from "next/cache";
 import { getDb, schema } from "@/db/client";
-import { CHANNELS, type CuratedChannel } from "@/data/channels";
-import { ingestChannel, type IngestedVideo } from "@/lib/youtube/ingest";
+import { DUMMY_CHANNELS, type DummyChannel, type ChannelCategory, type Platform } from "@/data/dummy-channels";
+import { analyzeBatch, type AnalysisOutcome } from "./analysis";
 
 /**
- * Live-data pipeline for the /channels page (and anything else that needs
- * real tracked-channel data): fetches all curated channels from the real
- * YouTube Data API, wrapped in Next.js's Data Cache (`unstable_cache`) so a
- * page load doesn't re-hit the API (and burn quota) on every request.
+ * Channel data pipeline for the /channels page (and anything downstream,
+ * like the constituency-brief pipeline).
  *
- * No DATABASE_URL is required for this to work — caching is handled by
- * Next.js itself. When DATABASE_URL *is* set, we additionally persist a
- * best-effort channel snapshot on every cache refresh (~hourly), which is
- * what powers real growth-over-time in src/lib/pipeline/alerts.ts. That
- * persistence is fire-and-forget and never affects what this function
- * returns, so a DB hiccup can't break the page.
+ * DESIGN NOTE (change of direction from the first pass): this used to call
+ * the real YouTube Data API for a curated list of real named channels (see
+ * git history and the still-present, now-unused src/lib/youtube/ +
+ * src/data/channels.ts). That was deliberately replaced with fictional
+ * personas spanning all four platforms named in the source PRD — YouTube,
+ * X, Instagram, Facebook (src/data/dummy-channels.ts) — attaching computed
+ * sentiment to real named creators, even genuinely computed rather than
+ * fabricated, was judged too close to the defamation/reputational risk the
+ * source PRD's own Section 7 warns about for a link that gets shared
+ * around. What's still REAL: the LLM sentiment/topic/narrative analysis
+ * run over this fictional content, per post, right here (src/lib/analysis
+ * via ./analysis, actual Anthropic API calls) — this is the "how it
+ * analyzes and shows results" step, not just a data display. See
+ * /methodology.
+ *
+ * `youtubeConfigured` is kept in the return shape for compatibility with
+ * pages built against the original (YouTube-only) contract, but is now
+ * always `true` — illustrative data has no API key dependency, for any of
+ * the four platforms. No DATABASE_URL is required either; when it *is*
+ * set, we additionally persist a best-effort snapshot per cache refresh so
+ * src/lib/pipeline/alerts.ts has real history to compute growth from
+ * (using this fictional data's numbers).
  */
 
-export interface ChannelVideoDisplay {
+export interface ChannelVideoDisplay extends AnalysisOutcome {
   title: string;
   url: string;
   publishedAt: string;
@@ -30,7 +44,9 @@ export interface ChannelVideoDisplay {
 export interface ChannelDisplay {
   handle: string;
   displayName: string;
-  category: CuratedChannel["category"];
+  platform: Platform;
+  profileUrl: string;
+  category: ChannelCategory;
   languageRegion: string;
   expectedPrimaryState?: string;
   justification: string;
@@ -39,8 +55,6 @@ export interface ChannelDisplay {
   viewCount: number | null;
   videoCount: number | null;
   recentVideos: ChannelVideoDisplay[];
-  /** Set when live ingestion failed for this specific channel (e.g. a
-   *  stale handle) — the row still renders with static metadata only. */
   error?: string;
 }
 
@@ -49,33 +63,35 @@ export interface ChannelsResult {
   channels: ChannelDisplay[];
 }
 
-function staticFallback(curated: CuratedChannel, error?: string): ChannelDisplay {
-  return {
-    handle: curated.handle,
-    displayName: curated.displayName,
-    category: curated.category,
-    languageRegion: curated.languageRegion,
-    expectedPrimaryState: curated.expectedPrimaryState,
-    justification: curated.justification,
-    isLive: false,
-    subscriberCount: null,
-    viewCount: null,
-    videoCount: null,
-    recentVideos: [],
-    error,
-  };
+const PROFILE_URL: Record<Platform, (handle: string) => string> = {
+  youtube: (h) => `https://youtube.com/${h}`,
+  x: (h) => `https://x.com/${h.replace(/^@/, "")}`,
+  instagram: (h) => `https://instagram.com/${h.replace(/^@/, "")}`,
+  facebook: (h) => `https://facebook.com/${h.replace(/^@/, "")}`,
+};
+
+/** Deterministic-ish slug, mirroring the original real-channel-era scheme
+ *  so any already-seeded DB rows/snapshots from before this change stay
+ *  addressable by the same ids for a given handle. */
+function slugFromHandle(platform: Platform, handle: string): string {
+  const clean = handle.replace(/^@/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return `${platform}-${clean}`;
+}
+
+/** Small illustrative jitter so numbers drift slightly between cache
+ *  refreshes (giving alerts something real to compute over) without
+ *  claiming any precision they don't have. +/- ~1.5%. */
+function jitter(base: number): number {
+  const delta = base * 0.015 * (Math.random() * 2 - 1);
+  return Math.max(0, Math.round(base + delta));
 }
 
 /** Best-effort persistence — never thrown to the caller. */
 async function persist(
-  curated: CuratedChannel,
+  channel: DummyChannel,
   channelId: string,
-  externalId: string,
-  resolvedTitle: string,
-  subscriberCount: number | null,
-  viewCount: number | null,
-  videoCount: number | null,
-  videos: IngestedVideo[]
+  subscriberCount: number,
+  posts: ChannelVideoDisplay[]
 ) {
   const db = getDb();
   if (!db) return;
@@ -84,12 +100,12 @@ async function persist(
       .insert(schema.channels)
       .values({
         id: channelId,
-        platform: "youtube",
-        displayName: curated.displayName || resolvedTitle,
-        handle: curated.handle,
-        externalId,
-        category: curated.category,
-        languageRegion: curated.languageRegion,
+        platform: channel.platform,
+        displayName: channel.displayName,
+        handle: channel.handle,
+        externalId: channelId,
+        category: channel.category,
+        languageRegion: channel.languageRegion,
         isLive: true,
         subscriberCount,
         lastFetchedAt: new Date(),
@@ -102,23 +118,32 @@ async function persist(
     await db.insert(schema.channelSnapshots).values({
       channelId,
       subscriberCount,
-      viewCount,
-      videoCount,
+      viewCount: null,
+      videoCount: channel.posts.length,
     });
 
-    for (const video of videos) {
-      const { topComments, ...row } = video;
-      void topComments; // content-table columns only — comments aren't persisted (see schema.ts)
+    for (const post of posts) {
+      const postId = `${channelId}-${post.title.slice(0, 40)}`.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       await db
         .insert(schema.content)
-        .values(row)
+        .values({
+          id: postId,
+          source: channel.platform,
+          channelId,
+          rssSourceId: null,
+          title: post.title,
+          snippet: null,
+          url: post.url,
+          publishedAt: new Date(post.publishedAt),
+          likeCount: post.likeCount,
+          commentCount: post.commentCount,
+          viewCount: post.viewCount,
+          guessedConstituencyId: null,
+          guessedState: null,
+        })
         .onConflictDoUpdate({
           target: schema.content.id,
-          set: {
-            likeCount: row.likeCount,
-            commentCount: row.commentCount,
-            viewCount: row.viewCount,
-          },
+          set: { likeCount: post.likeCount, commentCount: post.commentCount, viewCount: post.viewCount },
         });
     }
   } catch (err) {
@@ -126,56 +151,56 @@ async function persist(
   }
 }
 
-async function fetchAllChannelsLive(): Promise<ChannelsResult> {
-  if (!process.env.YOUTUBE_API_KEY) {
-    return { youtubeConfigured: false, channels: CHANNELS.map((c) => staticFallback(c)) };
-  }
-
-  const settled = await Promise.allSettled(CHANNELS.map((c) => ingestChannel(c)));
-
+async function buildDummyChannels(): Promise<ChannelsResult> {
   const channels: ChannelDisplay[] = await Promise.all(
-    settled.map(async (result, i) => {
-      const curated = CHANNELS[i];
-      if (result.status === "rejected") {
-        const message =
-          result.reason instanceof Error ? result.reason.message : String(result.reason);
-        console.warn(`[pipeline/channels] ingestion failed for ${curated.handle}:`, message);
-        return staticFallback(curated, message);
-      }
+    DUMMY_CHANNELS.map(async (channel) => {
+      const channelId = slugFromHandle(channel.platform, channel.handle);
+      const subscriberCount = jitter(channel.baseSubscriberCount);
+      const now = Date.now();
+      const buildUrl = PROFILE_URL[channel.platform];
 
-      const { channel, videos } = result.value;
-      await persist(
-        curated,
-        channel.id,
-        channel.externalId,
-        channel.displayName,
-        channel.subscriberCount ?? null,
-        null,
-        null,
-        videos
+      // Real LLM analysis (Anthropic) over this channel's illustrative
+      // posts — same analysis module/cache used for RSS content elsewhere,
+      // so results shown here are genuinely computed, not fabricated.
+      const analysisMap = await analyzeBatch(
+        channel.posts.map((p) => ({
+          id: `${channelId}-${p.title}`,
+          title: p.title,
+          snippet: p.snippet,
+          topCommentsText: p.topCommentsText,
+        }))
       );
 
+      const recentVideos: ChannelVideoDisplay[] = channel.posts.map((p) => {
+        const analysis = analysisMap.get(`${channelId}-${p.title}`)!;
+        return {
+          ...analysis,
+          title: p.title,
+          url: buildUrl(channel.handle),
+          publishedAt: new Date(now - p.daysAgo * 24 * 60 * 60 * 1000).toISOString(),
+          viewCount: jitter(p.baseViewCount),
+          likeCount: jitter(p.baseLikeCount),
+          commentCount: jitter(p.baseCommentCount),
+          topCommentsText: p.topCommentsText,
+        };
+      });
+
+      await persist(channel, channelId, subscriberCount, recentVideos);
+
       return {
-        handle: curated.handle,
+        handle: channel.handle,
         displayName: channel.displayName,
-        category: curated.category,
-        languageRegion: curated.languageRegion,
-        expectedPrimaryState: curated.expectedPrimaryState,
-        justification: curated.justification,
+        platform: channel.platform,
+        profileUrl: buildUrl(channel.handle),
+        category: channel.category,
+        languageRegion: channel.languageRegion,
+        expectedPrimaryState: channel.expectedPrimaryState,
+        justification: channel.justification,
         isLive: true,
-        subscriberCount: channel.subscriberCount ?? null,
+        subscriberCount,
         viewCount: null,
-        videoCount: null,
-        recentVideos: videos.map((v) => ({
-          title: v.title,
-          url: v.url,
-          publishedAt:
-            v.publishedAt instanceof Date ? v.publishedAt.toISOString() : String(v.publishedAt),
-          viewCount: v.viewCount ?? null,
-          likeCount: v.likeCount ?? null,
-          commentCount: v.commentCount ?? null,
-          topCommentsText: v.topComments.map((c) => c.text),
-        })),
+        videoCount: channel.posts.length,
+        recentVideos,
       } satisfies ChannelDisplay;
     })
   );
@@ -184,12 +209,12 @@ async function fetchAllChannelsLive(): Promise<ChannelsResult> {
 }
 
 /**
- * Cached for 1 hour via Next.js's Data Cache — call this from any Server
- * Component/Route Handler; repeated calls within the window are free (no
- * network call, no quota spent).
+ * Cached for 1 hour via Next.js's Data Cache. The illustrative "live" feel
+ * (small stat drift, snapshot history) comes from this cache expiring and
+ * `buildDummyChannels` re-rolling jitter — not from any external API call.
  */
 export const getChannelsWithLiveData = unstable_cache(
-  fetchAllChannelsLive,
-  ["channels-live-data-v1"],
+  buildDummyChannels,
+  ["channels-live-data-v3-multiplatform"],
   { revalidate: 3600 }
 );
