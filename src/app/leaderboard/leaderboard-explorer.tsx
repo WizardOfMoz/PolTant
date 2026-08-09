@@ -10,6 +10,7 @@ import type { AccountRow } from "@/lib/account-metrics";
 import { CATEGORY_LABEL, PLATFORM_LABEL } from "@/lib/account-metrics";
 import { AccountAvatar } from "@/components/accounts/account-avatar";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -19,7 +20,25 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { FormattedLeaderboard } from "@/components/charts/formatted-leaderboard";
 import { SENTIMENT_NEGATIVE, SENTIMENT_POSITIVE } from "@/lib/palette";
+
+type RankMode = "engagement" | "reach" | "growth";
+type PlatformFilter = "all" | Platform;
+type CategoryFilter = "all" | AccountCategory;
+
+const RANK_MODE_LABEL: Record<RankMode, string> = {
+  engagement: "Top by engagement rate",
+  reach: "Top by reach (followers)",
+  growth: "Top by growth",
+};
+
+const RANK_MODE_DESCRIPTION: Record<RankMode, string> = {
+  engagement: "Ranked by each account's most recent (day-90) engagement rate.",
+  reach: "Ranked by base follower/subscriber count — raw audience size, not engagement.",
+  growth:
+    "Only accounts currently flagged as rising (trailing 14-day follower growth above the alert threshold — see src/lib/alerts.ts).",
+};
 
 const followerFormatter = new Intl.NumberFormat("en-US", {
   notation: "compact",
@@ -35,7 +54,7 @@ function formatEngagementRate(rate: number | null): string {
   return `${(rate * 100).toFixed(1)}%`;
 }
 
-function GrowthIndicator({ row }: { row: AccountRow }) {
+function GrowthBadge({ row }: { row: AccountRow }) {
   if (!row.alert) {
     return <span className="text-xs text-muted-foreground">Steady</span>;
   }
@@ -51,32 +70,17 @@ function GrowthIndicator({ row }: { row: AccountRow }) {
   );
 }
 
-type CategoryFilter = "all" | AccountCategory;
-type PlatformFilter = "all" | Platform;
-
-interface ChannelsExplorerProps {
+interface LeaderboardExplorerProps {
   rows: AccountRow[];
 }
 
-export function ChannelsExplorer({ rows }: ChannelsExplorerProps) {
+const CHART_SIZE = 10;
+
+export function LeaderboardExplorer({ rows }: LeaderboardExplorerProps) {
   const router = useRouter();
+  const [rankMode, setRankMode] = useState<RankMode>("engagement");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
-
-  const platformCounts = useMemo(() => {
-    const counts: Record<Platform, number> = { youtube: 0, x: 0, instagram: 0, facebook: 0 };
-    for (const row of rows) counts[row.account.platform]++;
-    return { all: rows.length, ...counts };
-  }, [rows]);
-
-  const categoryCounts = useMemo(() => {
-    const counts: Record<AccountCategory, number> = {
-      "established-influencer": 0,
-      "rising-new-media": 0,
-    };
-    for (const row of rows) counts[row.account.category]++;
-    return { all: rows.length, ...counts };
-  }, [rows]);
 
   const filtered = useMemo(
     () =>
@@ -88,48 +92,98 @@ export function ChannelsExplorer({ rows }: ChannelsExplorerProps) {
     [rows, platformFilter, categoryFilter]
   );
 
+  const ranked = useMemo(() => {
+    if (rankMode === "reach") {
+      return [...filtered].sort((a, b) => b.account.baseFollowerCount - a.account.baseFollowerCount);
+    }
+    if (rankMode === "growth") {
+      return filtered
+        .filter((row) => row.alert && row.alert.direction === "up")
+        .sort((a, b) => (b.alert?.growthPct ?? 0) - (a.alert?.growthPct ?? 0));
+    }
+    // engagement
+    return [...filtered]
+      .filter((row) => row.latestEngagementRate !== null)
+      .sort((a, b) => (b.latestEngagementRate ?? 0) - (a.latestEngagementRate ?? 0));
+  }, [filtered, rankMode]);
+
+  const chartData = useMemo(() => {
+    const top = ranked.slice(0, CHART_SIZE);
+    if (rankMode === "reach") {
+      return top.map((row) => ({ label: row.account.displayName, value: row.account.baseFollowerCount }));
+    }
+    if (rankMode === "growth") {
+      return top.map((row) => ({ label: row.account.displayName, value: row.alert?.growthPct ?? 0 }));
+    }
+    return top.map((row) => ({
+      label: row.account.displayName,
+      value: Math.round((row.latestEngagementRate ?? 0) * 1000) / 10,
+    }));
+  }, [ranked, rankMode]);
+
+  const chartFormat = rankMode === "reach" ? "count" : rankMode === "growth" ? "percent-signed" : "percent";
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
+      <Tabs value={rankMode} onValueChange={(value) => setRankMode(value as RankMode)}>
+        <TabsList>
+          <TabsTrigger value="engagement">Engagement</TabsTrigger>
+          <TabsTrigger value="reach">Reach</TabsTrigger>
+          <TabsTrigger value="growth">Growth</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <Tabs value={platformFilter} onValueChange={(value) => setPlatformFilter(value as PlatformFilter)}>
           <TabsList className="flex-wrap">
-            <TabsTrigger value="all">All ({platformCounts.all})</TabsTrigger>
-            <TabsTrigger value="youtube">YouTube ({platformCounts.youtube})</TabsTrigger>
-            <TabsTrigger value="x">X ({platformCounts.x})</TabsTrigger>
-            <TabsTrigger value="instagram">Instagram ({platformCounts.instagram})</TabsTrigger>
-            <TabsTrigger value="facebook">Facebook ({platformCounts.facebook})</TabsTrigger>
+            <TabsTrigger value="all">All platforms</TabsTrigger>
+            <TabsTrigger value="youtube">YouTube</TabsTrigger>
+            <TabsTrigger value="x">X</TabsTrigger>
+            <TabsTrigger value="instagram">Instagram</TabsTrigger>
+            <TabsTrigger value="facebook">Facebook</TabsTrigger>
           </TabsList>
         </Tabs>
 
         <Tabs value={categoryFilter} onValueChange={(value) => setCategoryFilter(value as CategoryFilter)}>
           <TabsList className="flex-wrap">
             <TabsTrigger value="all">Any category</TabsTrigger>
-            <TabsTrigger value="established-influencer">
-              Established ({categoryCounts["established-influencer"]})
-            </TabsTrigger>
-            <TabsTrigger value="rising-new-media">
-              Rising ({categoryCounts["rising-new-media"]})
-            </TabsTrigger>
+            <TabsTrigger value="established-influencer">Established</TabsTrigger>
+            <TabsTrigger value="rising-new-media">Rising</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{RANK_MODE_LABEL[rankMode]}</CardTitle>
+          <CardDescription>{RANK_MODE_DESCRIPTION[rankMode]}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {chartData.length > 0 ? (
+            <FormattedLeaderboard data={chartData} format={chartFormat} colorBySign={rankMode === "growth"} />
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No accounts match the current filters{rankMode === "growth" ? " and rising threshold" : ""}.
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="rounded-xl border border-border">
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-10">#</TableHead>
               <TableHead>Account</TableHead>
               <TableHead>Platform</TableHead>
               <TableHead>Category</TableHead>
-              <TableHead>Language / region</TableHead>
-              <TableHead>Constituency</TableHead>
-              <TableHead className="text-right">Followers</TableHead>
               <TableHead className="text-right">Engagement</TableHead>
+              <TableHead className="text-right">Followers</TableHead>
               <TableHead>Growth</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.map((row) => {
+            {ranked.map((row, index) => {
               const { account } = row;
               return (
                 <TableRow
@@ -137,9 +191,10 @@ export function ChannelsExplorer({ rows }: ChannelsExplorerProps) {
                   className="cursor-pointer"
                   onClick={() => router.push(`/channels/${account.id}`)}
                 >
+                  <TableCell className="text-muted-foreground tabular-nums">{index + 1}</TableCell>
                   <TableCell className="max-w-56 whitespace-normal">
                     <div className="flex items-center gap-2.5">
-                      <AccountAvatar seed={account.avatarSeed} name={account.displayName} />
+                      <AccountAvatar seed={account.avatarSeed} name={account.displayName} size="sm" />
                       <div>
                         <div className="font-medium text-foreground">{account.displayName}</div>
                         <div className="text-xs text-muted-foreground">{account.handle}</div>
@@ -152,20 +207,14 @@ export function ChannelsExplorer({ rows }: ChannelsExplorerProps) {
                   <TableCell>
                     <Badge variant="outline">{CATEGORY_LABEL[account.category]}</Badge>
                   </TableCell>
-                  <TableCell className="whitespace-normal text-muted-foreground">
-                    {account.languageRegion}
-                  </TableCell>
-                  <TableCell className="whitespace-normal text-muted-foreground">
-                    {row.constituencyLabel ?? "National / not seat-specific"}
+                  <TableCell className="text-right tabular-nums">
+                    {formatEngagementRate(row.latestEngagementRate)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {formatFollowers(account.baseFollowerCount)}
                   </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {formatEngagementRate(row.latestEngagementRate)}
-                  </TableCell>
                   <TableCell>
-                    <GrowthIndicator row={row} />
+                    <GrowthBadge row={row} />
                   </TableCell>
                 </TableRow>
               );
@@ -173,13 +222,9 @@ export function ChannelsExplorer({ rows }: ChannelsExplorerProps) {
           </TableBody>
         </Table>
       </div>
-
-      <p className="text-xs text-muted-foreground">
-        Click a row to open that account&apos;s profile. &quot;Growth&quot; flags accounts whose
-        trailing 14-day follower change crosses the threshold defined in{" "}
-        <code>src/lib/alerts.ts</code> — everything else is shown as steady, which is the expected
-        default, not missing data.
-      </p>
+      {ranked.length === 0 && (
+        <p className="text-sm text-muted-foreground">No accounts match the current filters.</p>
+      )}
     </div>
   );
 }

@@ -12,12 +12,19 @@ import { LeaderboardBarChart, type LeaderboardItem } from "./leaderboard-bar-cha
  * formatter locally and hand it to LeaderboardBarChart without crossing
  * the server/client boundary.
  */
-export type LeaderboardValueFormat = "count" | "subscribers" | "percent-signed";
+export type LeaderboardValueFormat =
+  | "count"
+  | "subscribers"
+  | "percent"
+  | "percent-signed"
+  | "decimal-signed";
 
 const FORMATTERS: Record<LeaderboardValueFormat, (v: number) => string> = {
   count: (v) => v.toLocaleString(),
   subscribers: (v) => `${v.toLocaleString()} subscribers`,
+  percent: (v) => `${v.toFixed(1)}%`,
   "percent-signed": (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`,
+  "decimal-signed": (v) => `${v > 0 ? "+" : ""}${v.toFixed(2)}`,
 };
 
 export interface FormattedLeaderboardProps {

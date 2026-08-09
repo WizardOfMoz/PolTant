@@ -102,9 +102,12 @@ export function LeaderboardBarChart({
             )}
           />
           <Bar dataKey="value" radius={[0, 4, 4, 0]} maxBarSize={22} isAnimationActive={false}>
-            {data.map((item) => (
+            {data.map((item, index) => (
+              // Keyed by position, not `item.label` — labels aren't guaranteed
+              // unique (e.g. cross-platform sister accounts intentionally
+              // share a display name), so a label-only key can collide.
               <Cell
-                key={item.label}
+                key={`${index}-${item.label}`}
                 fill={colorBySign && item.value < 0 ? SENTIMENT_NEGATIVE : ACCENT}
               />
             ))}

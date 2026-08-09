@@ -4,30 +4,63 @@ Read this before writing code. It's the shared context for every module in this 
 
 ## What this is
 
-A prototype dashboard: constituency-level social/new-media sentiment intelligence for India's Lok Sabha seats. Real ECI election data drives swing-tier classification; real news RSS feeds are analyzed by a real LLM (Claude) for topic/sentiment/narrative. X/Instagram/Facebook are NOT live (official APIs require paid/approved access not obtainable here) — they're wired as inactive "connect your API key" adapters, not scrapers.
+A technical demo: constituency-level social/new-media sentiment intelligence for India's Lok
+Sabha seats, demonstrating the analytics described in
+`docs/PRD_Social_Sentiment_Constituency_Platform.pdf` end to end. Real ECI election data drives
+swing-tier classification (unchanged since the original build). **Every social-platform layer is
+fully synthetic**: accounts, posts, engagement, growth history, sentiment/topic/narrative
+"analysis", the cross-account influence graph, and cross-platform amplification are all generated
+by deterministic code in `src/data/mock/` — no live platform APIs (YouTube/X/Instagram/Facebook),
+no LLM calls, no database.
 
-**Tracked channels are fictional, by deliberate later decision** (see README.md and /methodology): the platform originally tracked real, named YouTube channels via the real YouTube Data API (`src/lib/youtube/`, `src/data/channels.ts` — both still present, unused). That was replaced with invented personas (`src/data/dummy-channels.ts`) once the product judged that attaching computed sentiment to real named creators — even genuinely computed — was too close to the defamation risk the source PRD's Section 7 warns about, for a widely-shared link. `src/lib/pipeline/channels.ts` now builds `ChannelDisplay` rows from the fictional data instead of live YouTube calls, but keeps the exact same return shape so nothing downstream (constituency briefs, alerts, pages) needed to change. Real LLM analysis still runs over this fictional content — only the source material is invented, not the analysis.
+**Why fully synthetic, not just fictional creators**: an earlier version of this prototype tracked
+real, named YouTube channels, then pivoted to invented personas (`src/data/dummy-channels.ts`,
+now superseded by `src/data/mock/accounts.ts`) while still running a real Anthropic LLM call over
+that fictional content, real RSS feeds, and a real Neon/Drizzle database for growth-snapshot
+history. That mixed real/fictional model was judged an unnecessary risk surface (live API keys,
+ToS exposure, a DB to provision) for what is fundamentally a demo of the PRD's analytics, not a
+product with real users — so the current build removed every live dependency in favor of a
+self-contained, deterministic mock-data layer that still demonstrates the same features (leaning
+into "wow" visual polish instead, since there's no live-data story to lean on).
 
 ## Non-negotiable framing rules (do not skip)
 
-- **No fabricated data presented as real.** If you can't get/verify a real number, either fetch it live, source it from a citable real dataset, or clearly mark it as an illustrative placeholder in the UI — never silently invent a number and label it as real.
-- **Neutral, analytical tone only.** This tool computes automated sentiment/topic classification about real named YouTube channels. Never use accusatory framing ("spreading misinformation", "attacking the government", "biased against X party") in UI copy, prompts, or seed data descriptions. Use neutral language: "content sentiment toward policy X: -0.3", "topics discussed", "engagement metrics". The LLM analysis prompt itself must instruct balance and neutrality.
-- **No individual commenter data.** Per the source PRD, never store commenter names/profile links/identifiers — only aggregate counts (likeCount, commentCount as numbers).
-- **Channel selection must be even-handed.** If you're curating a list of real YouTube political-commentary/news channels, include a range of perspectives/regions, not a one-sided set.
-- **Cite sources.** Any real dataset used (election results, TRAI/digital-penetration figures, channel lists) needs a short source note stored in the data (see `sourceNote` / `digitalEngagementSourceNote` fields in the schema) and surfaced on the `/methodology` page.
+- **Nothing here is a real person, account, or post.** Every account in `src/data/mock/accounts.ts`
+  is an invented persona; bios/handles/content must never resemble or caricature a real,
+  identifiable person or outlet.
+- **Neutral, analytical tone only.** Sentiment/topic/narrative mock-analysis text
+  (`src/data/mock/mock-analysis.ts`) scores the *policy/issue*, never a person's or account's
+  character. Never use accusatory framing ("spreading misinformation", "attacking the government",
+  "biased against X party") anywhere — in UI copy, mock-data generation, or narrative templates.
+- **No individual commenter data.** Per the source PRD, only aggregate counts (likeCount,
+  commentCount as numbers) — never individual identities, even fabricated ones.
+- **Even-handed spread.** The account universe spans a range of political leanings, regions, and
+  languages — not a one-sided set.
+- **Determinism, not `Math.random()`/`Date.now()`.** This app has no database — every request
+  regenerates data from the mock modules, so non-deterministic generation would make numbers
+  visibly flicker between page loads. Every `src/data/mock/*` module uses a seeded PRNG (keyed off
+  a stable id) so the same input always produces the same output.
+- **Cite what's still real.** Election results, constituency boundaries, and the Digital
+  Engagement Index (`src/data/constituencies.ts`, `src/data/election-results.ts`,
+  `src/lib/election/tiering.ts`) remain real, cited, offline data — keep their sourcing notes
+  intact and don't blur them together with the synthetic social-platform layer on `/methodology`.
 
 ## Stack & conventions
 
 - Next.js 16 App Router, TypeScript, `src/` dir, import alias `@/*`.
-- Tailwind v4 + shadcn/ui (components already added: button, card, badge, table, tabs, select, input, label, separator, dropdown-menu, skeleton, alert, avatar, sheet — in `src/components/ui/`). Clean, light, modern SaaS look — think Linear/Vercel/Notion, NOT a dark command-center theme. Use shadcn defaults, don't fight the theme.
-- DB: Neon Postgres via Drizzle ORM. Schema already defined in `src/db/schema.ts`, client in `src/db/client.ts` — import `{ getDb, schema }` from `@/db/client`. **`getDb()` returns `undefined` when `DATABASE_URL` isn't set** (true in local dev until the user wires up Neon) — every module that touches the DB must handle that gracefully (fall back to static data in `src/data/`, never throw).
-- `.npmrc` already sets `legacy-peer-deps=true` (react-simple-maps hasn't published React 19 peer ranges yet but works fine) — just use plain `npm install <pkg>`, no flags needed.
-- Path/dir conventions: `src/lib/youtube/`, `src/lib/rss/`, `src/lib/analysis/`, `src/lib/election/` for data-fetching/computation modules; `src/data/` for curated static seed data (constituencies, channels, rss sources, topojson); `src/components/` for shared UI; `src/app/` for pages (App Router).
-- Server-only API keys (`YOUTUBE_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, future `X_BEARER_TOKEN`/`META_ACCESS_TOKEN`, `SITE_PASSWORD`) are read via `process.env` in server-side code only (Route Handlers, Server Components, Server Actions) — never expose them to the client. Add every new env var to `.env.example` with a one-line comment on where to get it.
-- Money/time: this is a prototype. Prefer simple, direct code over abstraction. No premature config layers.
-
-## Where things stand
-
-Schema, DB client, Next.js scaffold, Tailwind/shadcn are done. Parallel work is happening now on: election/constituency seed data, YouTube ingestion, RSS ingestion, Anthropic analysis module, design system + map component. Pages come after, wired to whatever these modules export.
-
-Each module should export clean, typed functions/data that a page can import — assume the page-building step happens in a later pass by someone who will only read your exported interface, not your internals.
+- Tailwind v4 + shadcn/ui (`base-nova` style, components in `src/components/ui/`), plus a small
+  `src/components/dashboard/` primitives layer (`StatCard`, `BentoGrid`/`BentoCard`, `ChartCard`)
+  for the KPI/bento-grid dashboard look — see that folder's `index.ts` for provenance notes on
+  what was adapted from public component registries vs. original code. Clean, light, modern SaaS
+  look — Linear/Vercel/Notion, not a dark command-center theme.
+- No database, no ORM. `src/lib/types.ts` holds the plain TS interfaces (`Constituency`,
+  `ElectionResult`, `Channel`) that used to be Drizzle table schemas.
+- `src/data/` holds both the real seed data (`constituencies.ts`, `election-results.ts`,
+  `india-pc-boundaries.json`) and the synthetic layer (`src/data/mock/*`: `accounts.ts`,
+  `growth-history.ts`, `posts.ts`, `mock-analysis.ts`, `graph.ts`, `amplification.ts`).
+- `src/lib/alerts.ts` is the single source of truth for the growth-alert threshold/window — both
+  the Overview KPI and the Alerts page read from it rather than forking the logic.
+- `react-force-graph-2d` powers the `/network` influence-graph page; it needs `next/dynamic` with
+  `ssr: false` since it touches `window`/canvas.
+- Money/time: this is a demo. Prefer simple, direct code over abstraction. No premature config
+  layers, no env vars beyond the optional `SITE_PASSWORD` login gate.

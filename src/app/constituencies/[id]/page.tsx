@@ -3,8 +3,12 @@ import { notFound } from "next/navigation";
 
 import { constituencies } from "@/data/constituencies";
 import { electionResults } from "@/data/election-results";
-import { getConstituencyBrief } from "@/lib/pipeline/constituency";
+import { ACCOUNTS, type Account } from "@/data/mock/accounts";
 import { SENTIMENT_NEGATIVE, SENTIMENT_NEUTRAL, SENTIMENT_POSITIVE } from "@/lib/palette";
+import { getConstituencyBrief } from "@/lib/constituency-brief";
+import { buildNarrativeBriefSentence, PLATFORM_LABEL } from "@/lib/narrative-phrasing";
+import { slugifyTopic } from "@/lib/topic-slug";
+import { SentimentLineChart } from "@/components/charts/sentiment-line-chart";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -24,19 +28,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { TierBadge, CoverageTierBadge } from "../tier-badge";
-import type { Platform } from "@/data/dummy-channels";
 
-// This page calls the live-fetching, cached narrative-brief pipeline
-// (getConstituencyBrief), so it must not be frozen at build time.
-export const dynamic = "force-dynamic";
-
-const PLATFORM_LABEL: Record<Platform | "rss", string> = {
-  youtube: "YouTube",
-  x: "X",
-  instagram: "Instagram",
-  facebook: "Facebook",
-  rss: "News RSS",
-};
+/** Below this many matched posts, a sentiment-over-time chart would be more
+ *  misleading than informative (mostly empty/singleton buckets), so an
+ *  aggregate number is shown instead — see AGENTS.md task brief. */
+const MIN_POSTS_FOR_TIMESERIES = 6;
 
 interface PageParams {
   params: Promise<{ id: string }>;
@@ -64,10 +60,6 @@ function sentimentColor(score: number): string {
   return SENTIMENT_NEUTRAL;
 }
 
-function formatSigned(n: number): string {
-  return `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
-}
-
 export default async function ConstituencyDetailPage({ params }: PageParams) {
   const { id } = await params;
   const constituency = findConstituency(id);
@@ -77,7 +69,22 @@ export default async function ConstituencyDetailPage({ params }: PageParams) {
     .filter((r) => r.constituencyId === constituency.id)
     .sort((a, b) => a.year - b.year);
 
-  const { brief, items, briefUnavailable } = await getConstituencyBrief(constituency);
+  const primaryAccounts: Account[] = ACCOUNTS.filter(
+    (account) => account.primaryConstituencyId === constituency.id
+  );
+
+  const brief = getConstituencyBrief(constituency.id);
+  const {
+    matchedPosts,
+    usedAccountFallback,
+    analyzedPosts,
+    aggregateSentiment,
+    sentimentSeries,
+    dominantTopic: topic,
+    driverIds,
+    driverNames,
+    amplificationEvents,
+  } = brief;
 
   return (
     <div className="mx-auto max-w-4xl space-y-8 px-4 py-10">
@@ -180,37 +187,69 @@ export default async function ConstituencyDetailPage({ params }: PageParams) {
       <Separator />
 
       <section className="space-y-3">
+        <h2 className="text-lg font-medium">Sentiment over time</h2>
+        {matchedPosts.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No matched content is available for this seat to chart sentiment over time.
+          </p>
+        ) : matchedPosts.length < MIN_POSTS_FOR_TIMESERIES ? (
+          <Card>
+            <CardContent className="space-y-2 pt-4">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground">Aggregate sentiment</span>
+                <span className="font-medium" style={{ color: sentimentColor(aggregateSentiment) }}>
+                  {aggregateSentiment.toFixed(2)}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Only {matchedPosts.length} matched post{matchedPosts.length === 1 ? "" : "s"} were
+                found for this seat — too few to plot a meaningful trend line, so an aggregate
+                score is shown instead.
+              </p>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card>
+            <CardContent className="pt-4">
+              <SentimentLineChart data={sentimentSeries} />
+            </CardContent>
+          </Card>
+        )}
+      </section>
+
+      <Separator />
+
+      <section className="space-y-3">
         <h2 className="text-lg font-medium">Narrative brief</h2>
-        {briefUnavailable || !brief ? (
-          <Alert variant="destructive">
-            <AlertTitle>Brief unavailable</AlertTitle>
+        {matchedPosts.length === 0 || !topic ? (
+          <Alert>
+            <AlertTitle>Not enough matched content</AlertTitle>
             <AlertDescription>
-              ANTHROPIC_API_KEY not configured or a model error occurred.
+              No matched posts are available for this seat to synthesize a narrative brief.
             </AlertDescription>
           </Alert>
         ) : (
           <Card>
             <CardContent className="space-y-3 pt-4">
-              <p className="text-sm">{brief.dominantNarrative}</p>
+              <p className="text-sm">{buildNarrativeBriefSentence(brief)}</p>
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <span className="text-muted-foreground">Aggregate sentiment</span>
-                <span
-                  className="font-medium"
-                  style={{ color: sentimentColor(brief.sentimentScore) }}
-                >
-                  {brief.sentimentScore.toFixed(2)}
+                <span className="font-medium" style={{ color: sentimentColor(aggregateSentiment) }}>
+                  {aggregateSentiment.toFixed(2)}
                 </span>
-                {brief.sentimentDelta !== null && (
-                  <span className="text-xs text-muted-foreground">
-                    ({formatSigned(brief.sentimentDelta)} vs. prior period)
-                  </span>
-                )}
               </div>
-              {brief.topDrivers.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                <Link href={`/issues/${slugifyTopic(topic)}`}>
+                  <Badge variant="outline" className="text-[11px]">
+                    {topic}
+                  </Badge>
+                </Link>
+              </div>
+              {driverNames.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
-                  {brief.topDrivers.map((driver) => (
-                    <Badge key={driver} variant="secondary">
-                      {driver}
+                  {driverNames.map((name, i) => (
+                    <Badge key={`${driverIds[i]}-${name}`} variant="secondary">
+                      {name}
                     </Badge>
                   ))}
                 </div>
@@ -223,57 +262,110 @@ export default async function ConstituencyDetailPage({ params }: PageParams) {
       <Separator />
 
       <section className="space-y-3">
-        <h2 className="text-lg font-medium">Analyzed content ({items.length})</h2>
-        {items.length === 0 ? (
+        <h2 className="text-lg font-medium">Cross-platform amplification</h2>
+        {amplificationEvents.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No real content was matched to this constituency in the current window.
+            No cross-platform amplification events have been recorded for this seat.
           </p>
         ) : (
           <div className="space-y-2">
-            {items.map((item) => (
-              <Card key={item.url} className={item.unavailable ? "opacity-60" : undefined}>
+            {amplificationEvents.map((event) => (
+              <Card key={event.id}>
                 <CardContent className="space-y-1.5 pt-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <a
-                      href={item.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-sm font-medium hover:underline"
-                    >
-                      {item.title}
-                    </a>
-                    {!item.unavailable && (
-                      <span
-                        className="shrink-0 text-sm font-medium"
-                        style={{ color: sentimentColor(item.sentimentScore) }}
-                      >
-                        {item.sentimentScore.toFixed(2)}
-                      </span>
-                    )}
-                  </div>
+                  <p className="text-sm font-medium">{event.headline}</p>
                   <p className="text-xs text-muted-foreground">
-                    {item.sourceName} · {PLATFORM_LABEL[item.sourceKind]}
+                    {PLATFORM_LABEL[event.originPlatform]} → {PLATFORM_LABEL[event.targetPlatform]}
+                    {" · "}
+                    {event.hoursDelay}h delay · {event.spreadMultiplier.toFixed(1)}x spread
                   </p>
-                  {item.unavailable ? (
-                    <p className="text-xs italic text-muted-foreground">
-                      Analysis unavailable for this item.
-                    </p>
-                  ) : (
-                    <>
-                      <p className="text-sm text-muted-foreground">{item.narrativeSummary}</p>
-                      {item.topics.length > 0 && (
-                        <div className="flex flex-wrap gap-1">
-                          {item.topics.map((topic) => (
-                            <Badge key={topic} variant="outline" className="text-[11px]">
-                              {topic}
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  )}
                 </CardContent>
               </Card>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <Separator />
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-medium">Analyzed content ({matchedPosts.length})</h2>
+        {usedAccountFallback && matchedPosts.length > 0 && (
+          <p className="text-xs italic text-muted-foreground">
+            No geographically matched posts were found for this seat; showing content from
+            accounts primarily covering it instead.
+          </p>
+        )}
+        {matchedPosts.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No content was matched to this constituency in the current dataset.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {analyzedPosts.map(({ post, analysis }) => {
+              const account = ACCOUNTS.find((a) => a.id === post.accountId);
+              return (
+                <Card key={post.id}>
+                  <CardContent className="space-y-1.5 pt-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-sm font-medium">{post.title}</p>
+                      <span
+                        className="shrink-0 text-sm font-medium"
+                        style={{ color: sentimentColor(analysis.sentimentScore) }}
+                      >
+                        {analysis.sentimentScore.toFixed(2)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {account?.displayName ?? post.accountId}
+                      {account ? ` · ${PLATFORM_LABEL[account.platform]}` : ""} · {post.publishedAt}
+                    </p>
+                    <p className="text-sm text-muted-foreground">{analysis.narrativeSummary}</p>
+                    {analysis.topics.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {analysis.topics.map((topicLabel) => (
+                          <Link key={topicLabel} href={`/issues/${slugifyTopic(topicLabel)}`}>
+                            <Badge variant="outline" className="text-[11px]">
+                              {topicLabel}
+                            </Badge>
+                          </Link>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      <Separator />
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-medium">Accounts primarily covering this seat</h2>
+        {primaryAccounts.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No accounts are primarily associated with this seat in the current dataset.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {primaryAccounts.map((account) => (
+              <Link key={account.id} href={`/channels/${account.id}`} className="block">
+                <Card className="transition-colors hover:bg-muted/50">
+                  <CardContent className="flex items-center justify-between gap-3 pt-4">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">
+                        {account.displayName}{" "}
+                        <span className="text-muted-foreground">{account.handle}</span>
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {PLATFORM_LABEL[account.platform]} ·{" "}
+                        {account.baseFollowerCount.toLocaleString("en-IN")} followers
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              </Link>
             ))}
           </div>
         )}

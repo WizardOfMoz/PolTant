@@ -35,6 +35,8 @@ export interface SentimentLineChartProps {
   /** Optional neutral benchmark (e.g. a national/category average) drawn as a dashed neutral line. */
   referenceValue?: number;
   referenceLabel?: string;
+  /** Vertical annotation lines at specific dates (e.g. a controversy or campaign event). */
+  markers?: { date: string; label: string }[];
   className?: string;
 }
 
@@ -70,6 +72,7 @@ export function SentimentLineChart({
   domain = [-1, 1],
   referenceValue,
   referenceLabel,
+  markers,
   className,
 }: SentimentLineChartProps) {
   const gradientId = useId();
@@ -77,7 +80,13 @@ export function SentimentLineChart({
   return (
     <div className={cn("w-full", className)} style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+        <AreaChart
+          data={data}
+          // Markers render a small label above the plot area, so give it a
+          // touch more headroom when present; existing callers with no
+          // markers see the original margin, pixel-for-pixel.
+          margin={{ top: markers?.length ? 20 : 8, right: 8, bottom: 0, left: 0 }}
+        >
           <defs>
             <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={SENTIMENT_POSITIVE} stopOpacity={0.28} />
@@ -114,6 +123,20 @@ export function SentimentLineChart({
               }
             />
           )}
+          {markers?.map((marker) => (
+            <ReferenceLine
+              key={marker.date}
+              x={marker.date}
+              stroke={SENTIMENT_NEUTRAL}
+              strokeDasharray="3 3"
+              label={{
+                value: marker.label,
+                position: "top",
+                fontSize: 10,
+                fill: SENTIMENT_NEUTRAL,
+              }}
+            />
+          ))}
           <Tooltip content={SentimentTooltip} />
           <Area
             type="monotone"

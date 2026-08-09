@@ -1,7 +1,10 @@
-import { getGrowthAlerts, type GrowthAlert } from "@/lib/pipeline/alerts";
+import { computeGrowthAlerts, ALERT_WINDOW_DAYS, ALERT_THRESHOLD_PCT } from "@/lib/alerts";
+import { getAllPosts, type Post } from "@/data/mock/posts";
+import { analyzePost } from "@/data/mock/mock-analysis";
+import { ACCOUNTS, type AccountCategory } from "@/data/mock/accounts";
+import type { Platform } from "@/lib/types";
 import { FormattedLeaderboard } from "@/components/charts/formatted-leaderboard";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -12,49 +15,30 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import { Separator } from "@/components/ui/separator";
-import { SENTIMENT_POSITIVE, SENTIMENT_NEGATIVE } from "@/lib/palette";
+import { SENTIMENT_POSITIVE, SENTIMENT_NEGATIVE, SENTIMENT_NEUTRAL } from "@/lib/palette";
 
-// This page reads live snapshot history from the database on every request
-// (growth can only be computed by comparing snapshots recorded hours/days
-// apart, so there is nothing meaningful to pre-render at build time).
-export const dynamic = "force-dynamic";
+// This app has no database and no live APIs — every alert below is computed
+// from the deterministic mock data modules, so the page renders the same
+// content on every request and can be statically generated.
 
 export const metadata = {
-  title: "Rising channel alerts — Constituency Pulse",
+  title: "Rising channel & sentiment alerts — Constituency Pulse",
 };
 
-const CATEGORY_LABEL: Record<string, string> = {
+const CATEGORY_LABEL: Record<AccountCategory, string> = {
   "established-influencer": "Established influencer",
   "rising-new-media": "Rising new media",
 };
 
-function formatCount(n: number | null): string {
-  if (n == null) return "—";
+const PLATFORM_LABEL: Record<Platform, string> = {
+  youtube: "YouTube",
+  x: "X",
+  instagram: "Instagram",
+  facebook: "Facebook",
+};
+
+function formatCount(n: number): string {
   return n.toLocaleString();
-}
-
-/** Short absolute date + a relative-time hint, e.g. "Aug 8, 2026 (3h ago)". */
-function formatCapturedAt(iso: string | null): string {
-  if (!iso) return "—";
-  const date = new Date(iso);
-  const absolute = date.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-
-  const diffMs = Date.now() - date.getTime();
-  const diffHours = diffMs / (1000 * 60 * 60);
-  let relative: string;
-  if (diffHours < 1) {
-    relative = "under 1h ago";
-  } else if (diffHours < 48) {
-    relative = `${Math.round(diffHours)}h ago`;
-  } else {
-    relative = `${Math.round(diffHours / 24)}d ago`;
-  }
-
-  return `${absolute} (${relative})`;
 }
 
 function GrowthValue({ growthPct }: { growthPct: number }) {
@@ -68,188 +52,338 @@ function GrowthValue({ growthPct }: { growthPct: number }) {
   );
 }
 
-export default async function AlertsPage() {
-  const { databaseConfigured, alerts } = await getGrowthAlerts();
-
-  const intro = (
-    <div className="space-y-2">
-      <h1 className="text-2xl font-semibold tracking-tight">Rising channel alerts</h1>
-      <p className="text-muted-foreground">
-        This mirrors the source PRD&apos;s &quot;Rising Channel Alert&quot; concept: real
-        subscriber growth between two recorded snapshots is used as one signal for channels
-        crossing into more prominence, so they can be prioritized for closer tracking alongside
-        the established set.
-      </p>
-    </div>
+function SentimentDeltaValue({ delta }: { delta: number }) {
+  const color = delta >= 0 ? SENTIMENT_POSITIVE : SENTIMENT_NEGATIVE;
+  const sign = delta > 0 ? "+" : "";
+  return (
+    <span className="font-medium" style={{ color }}>
+      {sign}
+      {delta.toFixed(2)}
+    </span>
   );
+}
 
-  if (!databaseConfigured) {
-    return (
-      <div className="mx-auto max-w-3xl space-y-8 px-4 py-10">
-        {intro}
-        <Alert>
-          <AlertTitle>Growth tracking needs a database</AlertTitle>
-          <AlertDescription>
-            Detecting rising channels requires comparing at least two subscriber-count snapshots
-            recorded hours or days apart, which means it needs persistent storage — this
-            deployment doesn&apos;t have <code>DATABASE_URL</code> configured, so there is no
-            snapshot history to compare yet. See the &quot;Environment variables&quot; section of
-            the project README for how to add a Neon Postgres connection string, then redeploy.
-            Until then, this page has nothing real to show.
-          </AlertDescription>
-        </Alert>
-      </div>
-    );
+function SentimentScore({ score }: { score: number }) {
+  const color =
+    score > 0.15 ? SENTIMENT_POSITIVE : score < -0.15 ? SENTIMENT_NEGATIVE : SENTIMENT_NEUTRAL;
+  const sign = score > 0 ? "+" : "";
+  return (
+    <span style={{ color }}>
+      {sign}
+      {score.toFixed(2)}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sentiment-shift alerts — a second alert type layered on top of the shared
+// growth-alert logic in `src/lib/alerts.ts`. Kept local to this route (not
+// added to that shared file) since it has its own independent trailing-
+// window rule over post sentiment rather than follower counts, and that
+// shared module is being read by another in-flight page at the same time.
+//
+// Same trailing-window shape as `computeGrowthAlerts()`: compare each
+// account's average post sentiment over the most recent SENTIMENT_WINDOW_DAYS
+// against the SENTIMENT_WINDOW_DAYS immediately before that, using the latest
+// `publishedAt` across all mock posts as the "today" anchor (rather than the
+// real wall-clock date) so this stays consistent with the deterministic mock
+// data regardless of when the page happens to render.
+// ---------------------------------------------------------------------------
+
+const SENTIMENT_WINDOW_DAYS = 14;
+/** Minimum absolute swing in average sentiment (-1..1 scale) to qualify as an alert. */
+const SENTIMENT_SHIFT_THRESHOLD = 0.3;
+
+export interface SentimentShiftAlert {
+  accountId: string;
+  handle: string;
+  displayName: string;
+  platform: Platform;
+  category: AccountCategory;
+  recentAvgSentiment: number;
+  priorAvgSentiment: number;
+  recentPostCount: number;
+  priorPostCount: number;
+  delta: number;
+  direction: "up" | "down";
+}
+
+function isoDateDaysBefore(referenceDate: string, daysBefore: number): string {
+  const d = new Date(`${referenceDate}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() - daysBefore);
+  return d.toISOString().slice(0, 10);
+}
+
+function averageSentiment(posts: Post[]): number {
+  const total = posts.reduce((sum, post) => sum + analyzePost(post).sentimentScore, 0);
+  return Math.round((total / posts.length) * 100) / 100;
+}
+
+/** All accounts whose recent-vs-prior trailing-window average post sentiment
+ *  crosses SENTIMENT_SHIFT_THRESHOLD, sorted by |delta| desc. Accounts with
+ *  no posts in either window are skipped — there's nothing to compare. */
+function computeSentimentShiftAlerts(): SentimentShiftAlert[] {
+  const accountsById = new Map(ACCOUNTS.map((a) => [a.id, a]));
+  const posts = getAllPosts();
+
+  const referenceDate = posts.reduce(
+    (max, post) => (post.publishedAt > max ? post.publishedAt : max),
+    posts[0]?.publishedAt ?? ""
+  );
+  if (!referenceDate) return [];
+
+  const recentCutoff = isoDateDaysBefore(referenceDate, SENTIMENT_WINDOW_DAYS);
+  const priorCutoff = isoDateDaysBefore(referenceDate, SENTIMENT_WINDOW_DAYS * 2);
+
+  const postsByAccount = new Map<string, Post[]>();
+  for (const post of posts) {
+    const existing = postsByAccount.get(post.accountId);
+    if (existing) existing.push(post);
+    else postsByAccount.set(post.accountId, [post]);
   }
 
-  const ranked = alerts
-    .filter((a): a is GrowthAlert & { growthPct: number } => a.growthPct != null)
-    .sort((a, b) => b.growthPct - a.growthPct);
-  const unranked = alerts.filter((a) => a.growthPct == null);
+  const alerts: SentimentShiftAlert[] = [];
 
-  if (ranked.length === 0) {
-    return (
-      <div className="mx-auto max-w-3xl space-y-8 px-4 py-10">
-        {intro}
-        <Alert>
-          <AlertTitle>No growth data yet</AlertTitle>
-          <AlertDescription>
-            Growth requires at least two snapshots recorded over time for a channel, and none of
-            the tracked channels have that yet. The channels page records one snapshot
-            automatically roughly every hour — check back in a day or two once a few snapshots
-            have accumulated.
-          </AlertDescription>
-        </Alert>
-        {unranked.length > 0 && (
-          <p className="text-sm text-muted-foreground">
-            {unranked.length} channel{unranked.length === 1 ? "" : "s"} currently tracked, waiting
-            on a second snapshot.
-          </p>
-        )}
-      </div>
+  for (const [accountId, accountPosts] of postsByAccount) {
+    const account = accountsById.get(accountId);
+    if (!account) continue;
+
+    const recent = accountPosts.filter((p) => p.publishedAt > recentCutoff);
+    const prior = accountPosts.filter(
+      (p) => p.publishedAt <= recentCutoff && p.publishedAt > priorCutoff
     );
+    if (recent.length === 0 || prior.length === 0) continue;
+
+    const recentAvgSentiment = averageSentiment(recent);
+    const priorAvgSentiment = averageSentiment(prior);
+    const delta = Math.round((recentAvgSentiment - priorAvgSentiment) * 100) / 100;
+
+    if (Math.abs(delta) < SENTIMENT_SHIFT_THRESHOLD) continue;
+
+    alerts.push({
+      accountId: account.id,
+      handle: account.handle,
+      displayName: account.displayName,
+      platform: account.platform,
+      category: account.category,
+      recentAvgSentiment,
+      priorAvgSentiment,
+      recentPostCount: recent.length,
+      priorPostCount: prior.length,
+      delta,
+      direction: delta >= 0 ? "up" : "down",
+    });
   }
 
-  const chartData = ranked.map((a) => ({ label: a.displayName, value: a.growthPct }));
+  return alerts.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+}
+
+export default function AlertsPage() {
+  const growthAlerts = computeGrowthAlerts();
+  const sentimentAlerts = computeSentimentShiftAlerts();
+
+  const growthChartData = growthAlerts.map((a) => ({ label: a.displayName, value: a.growthPct }));
+  const sentimentChartData = sentimentAlerts.map((a) => ({ label: a.displayName, value: a.delta }));
 
   return (
-    <div className="mx-auto max-w-4xl space-y-8 px-4 py-10">
-      {intro}
+    <div className="mx-auto max-w-4xl space-y-10 px-4 py-10">
+      <div className="space-y-2">
+        <h1 className="text-2xl font-semibold tracking-tight">Rising channel &amp; sentiment alerts</h1>
+        <p className="text-muted-foreground">
+          Two independent signals over the same synthetic account roster: follower growth that
+          crosses a threshold over a trailing {ALERT_WINDOW_DAYS}-day window, and average post
+          sentiment that shifts sharply between two trailing {SENTIMENT_WINDOW_DAYS}-day windows.
+          Both are meant to flag accounts worth a closer look, not to make a judgment about them —
+          see <span className="font-medium">Methodology</span> for how everything here is computed.
+        </p>
+      </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Subscriber growth by channel</CardTitle>
-          <CardDescription>
-            Percent change between each channel&apos;s two most recent recorded snapshots, ranked
-            highest to lowest. Positive and negative growth are both real, reportable outcomes —
-            a decline is shown the same way a rise is.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <FormattedLeaderboard data={chartData} format="percent-signed" colorBySign />
-        </CardContent>
-      </Card>
+      {/* --------------------------------------------------------------- */}
+      {/* Growth alerts                                                   */}
+      {/* --------------------------------------------------------------- */}
+      <section className="space-y-4">
+        <div className="space-y-1">
+          <h2 className="text-lg font-medium">Growth alerts</h2>
+          <p className="text-sm text-muted-foreground">
+            Follower growth between the latest snapshot and the snapshot {ALERT_WINDOW_DAYS} days
+            earlier, for every account whose |growth| crosses {ALERT_THRESHOLD_PCT}%. Positive and
+            negative growth are both shown the same way.
+          </p>
+        </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Leaderboard</CardTitle>
-          <CardDescription>Channels with at least two recorded snapshots.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Channel</TableHead>
-                <TableHead>Category</TableHead>
-                <TableHead className="text-right">Latest subscribers</TableHead>
-                <TableHead className="text-right">Previous subscribers</TableHead>
-                <TableHead className="text-right">Growth</TableHead>
-                <TableHead>Latest snapshot</TableHead>
-                <TableHead>Previous snapshot</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {ranked.map((a) => (
-                <TableRow key={a.handle}>
-                  <TableCell>
-                    <div className="font-medium">{a.displayName}</div>
-                    <div className="text-xs text-muted-foreground">{a.handle}</div>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{CATEGORY_LABEL[a.category] ?? a.category}</Badge>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {formatCount(a.latestSubscriberCount)}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {formatCount(a.previousSubscriberCount)}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <GrowthValue growthPct={a.growthPct} />
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {formatCapturedAt(a.latestCapturedAt)}
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {formatCapturedAt(a.previousCapturedAt)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      {unranked.length > 0 && (
-        <>
-          <Separator />
+        {growthAlerts.length === 0 ? (
           <Card className="border-dashed">
-            <CardHeader>
-              <CardTitle className="text-sm text-muted-foreground">
-                Not enough history yet
-              </CardTitle>
-              <CardDescription>
-                These channels have only one recorded snapshot so far, so no growth figure can be
-                computed honestly. They&apos;ll appear in the leaderboard above once a second
-                snapshot is recorded.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Channel</TableHead>
-                    <TableHead>Category</TableHead>
-                    <TableHead className="text-right">Latest subscribers</TableHead>
-                    <TableHead>Latest snapshot</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {unranked.map((a) => (
-                    <TableRow key={a.handle} className="text-muted-foreground">
-                      <TableCell>
-                        <div className="font-medium text-foreground/80">{a.displayName}</div>
-                        <div className="text-xs">{a.handle}</div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="text-muted-foreground">
-                          {CATEGORY_LABEL[a.category] ?? a.category}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {formatCount(a.latestSubscriberCount)}
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        {formatCapturedAt(a.latestCapturedAt)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+            <CardContent className="pt-6 text-sm text-muted-foreground">
+              No accounts currently cross the {ALERT_THRESHOLD_PCT}% growth threshold.
             </CardContent>
           </Card>
-        </>
-      )}
+        ) : (
+          <>
+            <Card>
+              <CardHeader>
+                <CardTitle>Follower growth by account</CardTitle>
+                <CardDescription>
+                  Percent change over the trailing {ALERT_WINDOW_DAYS}-day window, ranked by
+                  magnitude.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <FormattedLeaderboard data={growthChartData} format="percent-signed" colorBySign />
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Leaderboard</CardTitle>
+                <CardDescription>
+                  Accounts whose trailing-window growth crosses {ALERT_THRESHOLD_PCT}%.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Account</TableHead>
+                      <TableHead>Platform</TableHead>
+                      <TableHead>Category</TableHead>
+                      <TableHead className="text-right">Latest followers</TableHead>
+                      <TableHead className="text-right">Previous followers</TableHead>
+                      <TableHead className="text-right">Growth</TableHead>
+                      <TableHead>Window</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {growthAlerts.map((a) => (
+                      <TableRow key={a.accountId}>
+                        <TableCell>
+                          <div className="font-medium">{a.displayName}</div>
+                          <div className="text-xs text-muted-foreground">{a.handle}</div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{PLATFORM_LABEL[a.platform]}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{CATEGORY_LABEL[a.category]}</Badge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {formatCount(a.latestFollowerCount)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {formatCount(a.previousFollowerCount)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <GrowthValue growthPct={a.growthPct} />
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {a.previousDate} &rarr; {a.latestDate}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </>
+        )}
+      </section>
+
+      <Separator />
+
+      {/* --------------------------------------------------------------- */}
+      {/* Sentiment shift alerts                                          */}
+      {/* --------------------------------------------------------------- */}
+      <section className="space-y-4">
+        <div className="space-y-1">
+          <h2 className="text-lg font-medium">Sentiment shift alerts</h2>
+          <p className="text-sm text-muted-foreground">
+            Average post sentiment (-1..1) over the trailing {SENTIMENT_WINDOW_DAYS} days compared
+            against the {SENTIMENT_WINDOW_DAYS} days before that, for every account whose swing is
+            at least &plusmn;{SENTIMENT_SHIFT_THRESHOLD.toFixed(1)}. Accounts with no posts in one
+            of the two windows are omitted rather than guessed at.
+          </p>
+        </div>
+
+        {sentimentAlerts.length === 0 ? (
+          <Card className="border-dashed">
+            <CardContent className="pt-6 text-sm text-muted-foreground">
+              No accounts currently cross the &plusmn;{SENTIMENT_SHIFT_THRESHOLD.toFixed(1)}{" "}
+              sentiment-shift threshold.
+            </CardContent>
+          </Card>
+        ) : (
+          <>
+            <Card>
+              <CardHeader>
+                <CardTitle>Sentiment shift by account</CardTitle>
+                <CardDescription>
+                  Change in average post sentiment between the two trailing windows, ranked by
+                  magnitude.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <FormattedLeaderboard
+                  data={sentimentChartData}
+                  format="decimal-signed"
+                  colorBySign
+                />
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Leaderboard</CardTitle>
+                <CardDescription>
+                  Accounts whose sentiment swing crosses &plusmn;
+                  {SENTIMENT_SHIFT_THRESHOLD.toFixed(1)}.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Account</TableHead>
+                      <TableHead>Platform</TableHead>
+                      <TableHead>Category</TableHead>
+                      <TableHead className="text-right">Recent avg. sentiment</TableHead>
+                      <TableHead className="text-right">Prior avg. sentiment</TableHead>
+                      <TableHead className="text-right">Shift</TableHead>
+                      <TableHead className="text-right">Posts (recent / prior)</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sentimentAlerts.map((a) => (
+                      <TableRow key={a.accountId}>
+                        <TableCell>
+                          <div className="font-medium">{a.displayName}</div>
+                          <div className="text-xs text-muted-foreground">{a.handle}</div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{PLATFORM_LABEL[a.platform]}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{CATEGORY_LABEL[a.category]}</Badge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <SentimentScore score={a.recentAvgSentiment} />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <SentimentScore score={a.priorAvgSentiment} />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <SentimentDeltaValue delta={a.delta} />
+                        </TableCell>
+                        <TableCell className="text-right text-xs text-muted-foreground">
+                          {a.recentPostCount} / {a.priorPostCount}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </>
+        )}
+      </section>
     </div>
   );
 }

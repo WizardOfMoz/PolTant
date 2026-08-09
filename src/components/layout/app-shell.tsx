@@ -7,11 +7,14 @@ import {
   AlertTriangle,
   BellRing,
   BookOpen,
+  Flag,
   LayoutDashboard,
   MapPinned,
   Menu,
   Radio,
+  Share2,
   Sparkles,
+  Trophy,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -22,6 +25,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
+import { ChatWidget } from "@/components/chat/chat-widget";
 
 interface NavLink {
   href: string;
@@ -31,8 +35,11 @@ interface NavLink {
 
 const NAV_LINKS: NavLink[] = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
+  { href: "/war-room", label: "War Room", icon: Flag },
   { href: "/constituencies", label: "Constituencies", icon: MapPinned },
-  { href: "/channels", label: "Channels", icon: Radio },
+  { href: "/channels", label: "Accounts", icon: Radio },
+  { href: "/leaderboard", label: "Leaderboard", icon: Trophy },
+  { href: "/network", label: "Network", icon: Share2 },
   { href: "/alerts", label: "Alerts", icon: BellRing },
   { href: "/methodology", label: "Methodology", icon: BookOpen },
 ];
@@ -153,6 +160,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <main className="flex-1 min-w-0">{children}</main>
         </div>
       </div>
+      <ChatWidget />
     </div>
   );
 }

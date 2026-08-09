@@ -24,15 +24,8 @@
  * once rather than on every row.
  */
 
-export interface ElectionResult {
-  constituencyId: string;
-  year: number;
-  winningParty: string;
-  runnerUpParty: string;
-  marginPct: number;
-  totalVotes: number;
-  sourceNote: string;
-}
+import type { ElectionResult } from "@/lib/types";
+export type { ElectionResult };
 
 interface RawResult {
   constituencyId: string;

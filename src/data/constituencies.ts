@@ -35,23 +35,10 @@ import {
   computeSwingMetrics,
   classifyCoverageTier,
   normalizeDigitalEngagementIndex,
-  type SwingTier,
-  type CoverageTier,
 } from "@/lib/election/tiering";
+import type { Constituency } from "@/lib/types";
 
-export interface Constituency {
-  id: string;
-  pcNumber: number;
-  name: string;
-  state: string;
-  tier: SwingTier;
-  marginVolatility: number;
-  flipFrequency: number;
-  closenessIndex: number;
-  digitalEngagementIndex: number;
-  digitalEngagementSourceNote: string;
-  coverageTier: CoverageTier;
-}
+export type { Constituency };
 
 /** Identity + input fields only — everything else is derived below. */
 interface ConstituencySeed {
