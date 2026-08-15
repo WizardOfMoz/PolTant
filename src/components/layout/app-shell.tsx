@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   AlertTriangle,
+  ArrowLeftRight,
   BellRing,
   BookOpen,
   Flag,
@@ -37,6 +38,7 @@ const NAV_LINKS: NavLink[] = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/war-room", label: "War Room", icon: Flag },
   { href: "/constituencies", label: "Constituencies", icon: MapPinned },
+  { href: "/compare", label: "Compare", icon: ArrowLeftRight },
   { href: "/channels", label: "Accounts", icon: Radio },
   { href: "/leaderboard", label: "Leaderboard", icon: Trophy },
   { href: "/network", label: "Network", icon: Share2 },
